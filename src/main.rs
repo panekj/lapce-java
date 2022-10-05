@@ -1,8 +1,12 @@
-use std::{fs::File, path::PathBuf};
+use std::{
+    fs::{self, File},
+    io::{self},
+    path::PathBuf,
+};
 
 use anyhow::Result;
-use tar_wasi::Archive;
 
+use flate2::read::MultiGzDecoder;
 use lapce_plugin::{
     psp_types::{
         lsp_types::{request::Initialize, DocumentFilter, DocumentSelector, InitializeParams, Url},
@@ -59,7 +63,8 @@ fn initialize(params: InitializeParams) -> Result<()> {
         }
     }
 
-    let file_name = "jdt-language-server";
+    let file_name = "jdt-language-server-latest";
+    let dir = PathBuf::from(file_name);
     let gz_path = PathBuf::from(format!("{file_name}.tar.gz"));
     let url = format!(
         "http://download.eclipse.org/jdtls/snapshots/{}.tar.gz",
@@ -67,12 +72,30 @@ fn initialize(params: InitializeParams) -> Result<()> {
     );
 
     if !PathBuf::from(file_name).exists() {
-        let mut resp = Http::get(&url)?;
-        let body = resp.body_read_all()?;
-        std::fs::write(&gz_path, body)?;
-        std::fs::create_dir(file_name)?;
-        let mut tar = Archive::new(File::open(&gz_path)?);
-        tar.unpack(file_name)?;
+        if !gz_path.exists() {
+            let mut resp = Http::get(&url)?;
+            let body = resp.body_read_all()?;
+            fs::write(&gz_path, body)?;
+        }
+
+        let tar_gz = fs::File::open(gz_path).unwrap();
+        let tar = MultiGzDecoder::new(tar_gz);
+        let mut archive = tar::Archive::new(tar);
+        fs::create_dir(&dir)?;
+        for (_, file) in archive.entries().unwrap().raw(true).enumerate() {
+            let mut entry = file?;
+            let entry_type = entry.header().entry_type();
+            if !entry_type.is_dir() && !entry_type.is_file() {
+                continue;
+            }
+            let entry_path = dir.join(&entry.path()?);
+            if entry_type.is_dir() {
+                fs::create_dir_all(&entry_path)?;
+            } else if entry_type.is_file() {
+                let mut outfile = File::create(&entry_path)?;
+                io::copy(&mut entry, &mut outfile)?;
+            }
+        }
     }
 
     // Plugin working directory
@@ -80,12 +103,12 @@ fn initialize(params: InitializeParams) -> Result<()> {
 
     let base_path = Url::parse(&volt_uri)?;
 
-    let jdtls = base_path.join(&format!("{file_name}/bin/jdtls"))?;
+    let server_uri = base_path.join(file_name)?.join("bin")?.join("jdtls")?;
 
-    PLUGIN_RPC.stderr(&format!("Starting java lsp server: {jdtls:?}"));
+    PLUGIN_RPC.stderr(&format!("Starting java lsp server: {server_uri:?}"));
 
     PLUGIN_RPC.start_lsp(
-        jdtls,
+        server_uri,
         server_args,
         document_selector,
         params.initialization_options,
@@ -101,7 +124,12 @@ impl LapcePlugin for State {
         match method.as_str() {
             Initialize::METHOD => {
                 let params: InitializeParams = serde_json::from_value(params).unwrap();
-                let _ = initialize(params);
+                match initialize(params) {
+                    Ok(_) => (),
+                    Err(e) => {
+                        PLUGIN_RPC.stderr(&format!("plugin returned with error: {e}"))
+                    }
+                };
             }
             _ => {}
         }

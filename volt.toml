@@ -4,3 +4,7 @@ author = "Paul Delafosse <paul.delfafosse@gmail.com>"
 display-name = "Java"
 description = "Lapce LSP plugin for java, powered by Eclipse JDT Language Server"
 wasm = "lapce-java.wasm"
+
+[activation]
+language = ["java"]
+workspace-contains = ["*/*.java"]
